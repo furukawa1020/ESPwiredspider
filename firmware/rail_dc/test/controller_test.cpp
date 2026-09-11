@@ -40,5 +40,11 @@ int main() {
   c.apply(move("pending",0,1,3000),10000,10001);
   c.apply(move("pending-reverse",0,-1,3000),10001,10002);
   c.stopAll("link lost"); c.tick(10100,10101); assert(outputs[0]==0);
+  auto local = move("local-http", 0, 1, 500); local.local = true;
+  c.apply(local, 11000, 11001);
+  c.apply(move("remote-ws", 1, 1, 3000), 11000, 11001);
+  c.stopAll("link lost", true);
+  assert(outputs[0] == 1 && outputs[1] == 0);
+  c.tick(11500, 11501); assert(outputs[0] == 0);
   std::cout << "PASS: timed stop, replacement, reversal delay, independent axes, deduplication, expiry, timer wrap, link stop\n";
 }

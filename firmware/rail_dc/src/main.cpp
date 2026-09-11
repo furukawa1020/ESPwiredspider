@@ -3,6 +3,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <WebSocketsClient.h>
+#include <WebServer.h>
 #include <sys/time.h>
 #include "controller.h"
 
@@ -22,6 +23,8 @@ Config cfg;
 WebSocketsClient ws;
 bool configured = false, socketStarted = false, wifiStarted = false;
 String authHeader;
+WebServer http(80);
+String localToken, apName, apPassword;
 
 uint64_t utcMs() {
   timeval tv;
@@ -95,7 +98,7 @@ bool loadConfig(JsonVariantConst root, Config& out) {
   return true;
 }
 
-void printStatus() {
+String statusJson() {
   Snapshot snapshot{};
   xQueuePeek(snapshotQueue, &snapshot, 0);
   StaticJsonDocument<768> doc;
@@ -105,23 +108,96 @@ void printStatus() {
   doc["wifi_connected"] = WiFi.status() == WL_CONNECTED;
   doc["server_connected"] = linkHealthy();
   doc["pwm_duty"] = DUTY;
+  doc["standby_pin_high"] = digitalRead(STANDBY) == HIGH;
+  doc["http_port"] = 80;
+  doc["ip"] = configured ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
   auto axes = doc.createNestedArray("axes");
   for (int i = 0; i < 3; ++i) {
     auto a = axes.createNestedObject();
-    a["axis"] = i == 0 ? "X" : i == 1 ? "Y" : "Z";
+    a["axis"] = i == 0 ? "x" : i == 1 ? "y" : "z";
     a["active"] = snapshot.active[i];
     a["pending"] = snapshot.pending[i];
     a["remaining_ms"] = snapshot.remainingMs[i];
   }
-  serializeJson(doc, Serial);
-  Serial.println();
+  String result;
+  serializeJson(doc, result);
+  return result;
+}
+void printStatus() { Serial.println(statusJson()); }
+
+void localStop() {
+  rail::Command cmd;
+  cmd.local = true; cmd.stop = true;
+  snprintf(cmd.id, sizeof(cmd.id), "serial-%08x-%08x", esp_random(), millis());
+  xQueueReset(commandQueue);
+  xQueueSend(commandQueue, &cmd, 0);
+}
+
+bool httpAuthorized() {
+  if (http.header("Authorization") == "Bearer " + localToken) return true;
+  http.send(401, "application/json", "{\"error\":\"unauthorized\"}");
+  return false;
+}
+
+void httpCommand(bool stopping) {
+  if (!httpAuthorized()) return;
+  StaticJsonDocument<512> doc;
+  if (!http.header("Content-Type").startsWith("application/json") ||
+      http.arg("plain").length() > 512 || deserializeJson(doc, http.arg("plain")) ||
+      !doc.is<JsonObject>()) {
+    http.send(400, "application/json", "{\"error\":\"expected JSON object\"}"); return;
+  }
+  rail::Command cmd;
+  cmd.local = true; cmd.stop = stopping;
+  const char* axis = doc["axis"] | "";
+  cmd.axis = !strcmp(axis,"x") ? 0 : !strcmp(axis,"y") ? 1 : !strcmp(axis,"z") ? 2 : -1;
+  if ((cmd.axis < 0 && (!stopping || !doc["axis"].isNull())) ||
+      (!stopping && (!doc["direction"].is<int>() || !doc["duration_ms"].is<uint32_t>() ||
+        (doc["direction"].as<int>() != 1 && doc["direction"].as<int>() != -1) ||
+        doc["duration_ms"].as<uint32_t>() < 1 || doc["duration_ms"].as<uint32_t>() > 60000))) {
+    http.send(422, "application/json", "{\"error\":\"invalid axis, direction or duration_ms\"}"); return;
+  }
+  cmd.direction = doc["direction"] | 0;
+  cmd.durationMs = doc["duration_ms"] | 0u;
+  // Local requests need no NTP; only the bounded queue residence is limited here.
+  cmd.expiresAtMs = utcMs() + 2000;
+  snprintf(cmd.id, sizeof(cmd.id), "http-%08x-%08x", esp_random(), millis());
+  if (stopping && cmd.axis == -1) xQueueReset(commandQueue);
+  if (xQueueSend(commandQueue, &cmd, 0) != pdTRUE) {
+    http.send(503, "application/json", "{\"error\":\"command queue full\"}"); return;
+  }
+  StaticJsonDocument<192> response;
+  response["command_id"] = cmd.id;
+  response["status"] = "accepted";
+  String body; serializeJson(response, body);
+  http.send(202, "application/json", body);
+}
+
+void httpTask(void*) {
+  const char* headers[] = {"Authorization", "Content-Type"};
+  http.collectHeaders(headers, 2);
+  http.on("/api/v1/rail/move", HTTP_POST, [] { httpCommand(false); });
+  http.on("/api/v1/rail/stop", HTTP_POST, [] { httpCommand(true); });
+  http.on("/api/v1/rail/status", HTTP_GET, [] {
+    if (httpAuthorized()) http.send(200, "application/json", statusJson());
+  });
+  http.onNotFound([] { http.send(404, "application/json", "{\"error\":\"not found\"}"); });
+  http.begin();
+  for (;;) { http.handleClient(); vTaskDelay(pdMS_TO_TICKS(2)); }
 }
 
 void processSerialLine(const String& text) {
+  if (text == "access") {
+    StaticJsonDocument<512> doc;
+    doc["api_token"] = localToken;
+    if (!configured) { doc["ssid"] = apName; doc["password"] = apPassword; }
+    serializeJson(doc, Serial); Serial.println(); return;
+  }
   if (text == "?" || text == "status") { printStatus(); return; }
   if (text == "s" || text == "stop") {
     setLink(false);
     xQueueReset(commandQueue);
+    localStop();
     ws.disconnect();
     Serial.println("STOP requested; all DC outputs disabled by control task");
     return;
@@ -155,7 +231,6 @@ void processSerialLine(const String& text) {
 void onWebSocket(WStype_t type, uint8_t* data, size_t length) {
   if (type == WStype_DISCONNECTED) {
     setLink(false);
-    xQueueReset(commandQueue);
     return;
   }
   if (type == WStype_CONNECTED) {
@@ -222,6 +297,18 @@ void networkTask(void*) {
     }
   }
   Serial.println("RAIL DC XYZ v1.0 ready. Outputs stopped; STBY LOW.");
+  char randomKey[33];
+  snprintf(randomKey, sizeof(randomKey), "%08x%08x%08x%08x", esp_random(), esp_random(), esp_random(), esp_random());
+  localToken = randomKey;
+  if (!configured) {
+    apName = "Rail-ESP32-" + String(static_cast<uint32_t>(ESP.getEfuseMac()), HEX);
+    apPassword = localToken.substring(0, 16);
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(apName.c_str(), apPassword.c_str());
+  }
+  Serial.println("HTTP API enabled. Serial command 'access' shows this boot's API token and AP credentials.");
+  if (xTaskCreatePinnedToCore(httpTask, "rail-http", 10000, nullptr, 1, nullptr, 0) != pdPASS)
+    Serial.println("HTTP task failed to start");
   printStatus();
   ws.onEvent(onWebSocket);
   ws.setReconnectInterval(3000);
@@ -302,14 +389,14 @@ void setup() {
 }
 
 void loop() {
-  if (!linkHealthy()) controller.stopAll("Connection lost or heartbeat timeout");
+  if (!linkHealthy()) controller.stopAll("Connection lost or heartbeat timeout", true);
   if (uxQueueSpacesAvailable(eventQueue) < 8) {
     controller.stopAll("Event queue congested");
     xQueueReset(commandQueue);
   }
   rail::Command command;
   for (unsigned i = 0; i < 4 && xQueueReceive(commandQueue, &command, 0) == pdTRUE; ++i) {
-    if (command.stop || linkHealthy()) controller.apply(command, millis(), utcMs());
+    if (command.stop || command.local || linkHealthy()) controller.apply(command, millis(), utcMs());
     else report(command.id, "failed", "Connection not ready");
   }
   const uint32_t now = millis();

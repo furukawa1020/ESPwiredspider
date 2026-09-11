@@ -4,6 +4,7 @@
 
 namespace rail {
 struct Command {
+  bool local = false;
   bool stop = false;
   int8_t axis = -1;
   int8_t direction = 0;
@@ -12,6 +13,7 @@ struct Command {
   char id[64] = {};
 };
 struct Axis {
+  bool local = false;
   bool active = false;
   bool pending = false;
   int8_t direction = 0;
@@ -53,6 +55,7 @@ class Controller {
     const bool reverse = a.active && a.direction != cmd.direction;
     cancel(cmd.axis);
     a.pending = reverse;
+    a.local = cmd.local;
     a.direction = cmd.direction;
     a.durationMs = cmd.durationMs;
     a.expiresAtMs = cmd.expiresAtMs;
@@ -79,10 +82,10 @@ class Controller {
     }
   }
 
-  void stopAll(const char* reason) {
+  void stopAll(const char* reason, bool remoteOnly = false) {
     for (uint8_t i = 0; i < 3; ++i) {
       auto& a = axes_[i];
-      if (a.active || a.pending) {
+      if ((a.active || a.pending) && (!remoteOnly || !a.local)) {
         a.active = a.pending = false;
         io_.release(i);
         finish(a.id, "failed", reason);
