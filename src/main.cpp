@@ -3,8 +3,11 @@
 namespace {
 // IN1, IN2, IN3, IN4: keep this wiring order.
 constexpr uint8_t MOTOR_PINS[4] = {13, 14, 16, 17};
+constexpr uint8_t MOTOR2_PINS[4] = {18, 19, 21, 22};
 constexpr uint32_t STEPS_PER_REV = 4096;  // Approximate; calibrate on hardware.
 constexpr uint32_t STEP_INTERVAL_US = 2000;
+constexpr uint32_t START_INTERVAL_US = 2000;
+constexpr uint32_t ACCELERATION_US_PER_STEP = 2;
 constexpr uint8_t HALF_STEP_SEQUENCE[8][4] = {
     {1, 0, 0, 0},
     {1, 1, 0, 0},
@@ -59,7 +62,7 @@ class HalfStepMotor {
   // Call frequently. Returns true once a finite move has finished.
   bool update(uint32_t nowUs) {
     if (mode_ == Mode::Stopped ||
-        static_cast<uint32_t>(nowUs - lastStepUs_) < intervalUs_) {
+        static_cast<uint32_t>(nowUs - lastStepUs_) < currentIntervalUs_) {
       return false;
     }
     // Hold the last phase for a full interval before releasing the coils.
@@ -77,6 +80,11 @@ class HalfStepMotor {
     if (mode_ == Mode::Finite) {
       --remainingSteps_;
     }
+    if (currentIntervalUs_ > intervalUs_) {
+      const uint32_t difference = currentIntervalUs_ - intervalUs_;
+      currentIntervalUs_ -= difference < ACCELERATION_US_PER_STEP
+                                ? difference : ACCELERATION_US_PER_STEP;
+    }
     return false;
   }
 
@@ -86,11 +94,14 @@ class HalfStepMotor {
   void start(int8_t direction, Mode mode) {
     direction_ = direction > 0 ? 1 : -1;
     mode_ = mode;
+    currentIntervalUs_ = intervalUs_ < START_INTERVAL_US
+                             ? START_INTERVAL_US : intervalUs_;
     lastStepUs_ = micros();
   }
 
   uint8_t pins_[4];
   const uint32_t intervalUs_;
+  uint32_t currentIntervalUs_ = START_INTERVAL_US;
   uint8_t phase_ = 0;
   int8_t direction_ = 1;
   Mode mode_ = Mode::Stopped;
@@ -99,14 +110,18 @@ class HalfStepMotor {
 };
 
 HalfStepMotor motor(MOTOR_PINS, STEP_INTERVAL_US);
+HalfStepMotor motor2(MOTOR2_PINS, STEP_INTERVAL_US);
+HalfStepMotor* selectedMotor = &motor;
 
 void printHelp() {
   Serial.println("=== 28BYJ-48 Motor Test ===");
+  Serial.println("1 / 2 : select motor (default: Motor 1)");
   Serial.println("f : forward ~1 revolution (4096 half-steps)");
   Serial.println("b : backward ~1 revolution (4096 half-steps)");
   Serial.println("r : continuous forward");
   Serial.println("l : continuous backward");
-  Serial.println("s : stop / coils off (also during a finite move)");
+  Serial.println("s : stop BOTH motors / coils off");
+  Serial.println("Motion commands apply to the selected motor only.");
   Serial.println("New motion commands replace the current move.");
 }
 
@@ -115,29 +130,38 @@ void handleSerial() {
   for (uint8_t count = 0; count < 16 && Serial.available() > 0; ++count) {
     const char command = static_cast<char>(Serial.read());
     switch (command) {
+      case '1':
+        selectedMotor = &motor;
+        Serial.println("Selected Motor 1");
+        break;
+      case '2':
+        selectedMotor = &motor2;
+        Serial.println("Selected Motor 2");
+        break;
       case 'f':
       case 'F':
-        motor.move(1, STEPS_PER_REV);
+        selectedMotor->move(1, STEPS_PER_REV);
         Serial.println("Forward: ~1 revolution");
         break;
       case 'b':
       case 'B':
-        motor.move(-1, STEPS_PER_REV);
+        selectedMotor->move(-1, STEPS_PER_REV);
         Serial.println("Backward: ~1 revolution");
         break;
       case 'r':
       case 'R':
-        motor.run(1);
+        selectedMotor->run(1);
         Serial.println("Continuous forward");
         break;
       case 'l':
       case 'L':
-        motor.run(-1);
+        selectedMotor->run(-1);
         Serial.println("Continuous backward");
         break;
       case 's':
       case 'S':
         motor.stop();
+        motor2.stop();
         Serial.println("STOP: coils off");
         break;
       case '\n':
@@ -155,6 +179,7 @@ void handleSerial() {
 
 void setup() {
   motor.begin();
+  motor2.begin();
   Serial.begin(115200);
   delay(500);
   Serial.println();
@@ -164,7 +189,13 @@ void setup() {
 
 void loop() {
   handleSerial();
-  if (motor.update(micros())) {
+  const uint32_t nowUs = micros();
+  if (motor.update(nowUs)) {
+    Serial.println("Motor 1");
+    Serial.println("Done: coils off");
+  }
+  if (motor2.update(nowUs)) {
+    Serial.println("Motor 2");
     Serial.println("Done: coils off");
   }
 }

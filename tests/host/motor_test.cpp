@@ -18,16 +18,21 @@ static unsigned mask() {
   return levels[13] | (levels[14] << 1) | (levels[16] << 2) | (levels[17] << 3);
 }
 
-static void tick(uint32_t elapsed = 2000) {
+static unsigned mask2() {
+  return levels[18] | (levels[19] << 1) | (levels[21] << 2) | (levels[22] << 3);
+}
+
+static void tick(uint32_t elapsed = START_INTERVAL_US) {
   clockUs += elapsed;
   loop();
 }
 
 int main() {
   setup();
-  assert(Serial.baud == 115200 && mask() == 0);
+  assert(Serial.baud == 115200 && mask() == 0 && mask2() == 0);
   for (int pin : writes) {
-    assert(pin == 13 || pin == 14 || pin == 16 || pin == 17);
+    assert(pin == 13 || pin == 14 || pin == 16 || pin == 17 ||
+           pin == 18 || pin == 19 || pin == 21 || pin == 22);
   }
 
   // Verify physical output patterns, count and final dwell in both directions.
@@ -36,7 +41,7 @@ int main() {
   for (char direction : {'f', 'b'}) {
     command(direction);
     writes.clear();
-    tick(1999);
+    tick(START_INTERVAL_US - 1);
     assert(writes.empty());
     tick(1);
     assert(mask() == (direction == 'f' ? forward[0] : backward[0]));
@@ -45,7 +50,7 @@ int main() {
       assert(mask() == (direction == 'f' ? forward[step % 8] : backward[step % 8]));
     }
     assert(writes.size() == 4096 * 4 && mask() != 0);
-    tick(1999);
+    tick(STEP_INTERVAL_US - 1);
     assert(mask() != 0);
     tick(1);
     assert(mask() == 0);
@@ -77,7 +82,7 @@ int main() {
   clockUs = UINT32_MAX - 999;
   command('L');
   writes.clear();
-  tick(1999);
+  tick(START_INTERVAL_US - 1);
   assert(writes.empty());
   tick(1);
   assert(writes.size() == 4);
@@ -86,10 +91,69 @@ int main() {
   loop();
   assert(writes.size() == 8);
   command('s');
+  // Acceleration starts slowly, reaches the target, and restarts after stop.
+  command('r');
+  writes.clear();
+  tick(START_INTERVAL_US);
+  assert(writes.size() == 4);
+  const uint32_t firstReduction = STEP_INTERVAL_US < START_INTERVAL_US
+                                      ? ACCELERATION_US_PER_STEP : 0;
+  tick(START_INTERVAL_US - firstReduction - 1);
+  assert(writes.size() == 4);
+  tick(1);
+  assert(writes.size() == 8);
+  for (unsigned step = 0; step < 1000; ++step) tick();
+  writes.clear();
+  tick(STEP_INTERVAL_US - 1);
+  assert(writes.empty());
+  tick(1);
+  assert(writes.size() == 4);
+  command('s');
+  command('r');
+  writes.clear();
+  tick(START_INTERVAL_US - 1);
+  assert(writes.empty());
+  tick(1);
+  assert(writes.size() == 4);
+  command('s');
   command('\r');
   command('\n');
   command('?');
   assert(mask() == 0);
   assert(Serial.output.find("Done: coils off") != std::string::npos);
-  std::cout << "PASS: phase order, step count, dwell, stop, replacement, timer wrap\n";
+  assert(mask2() == 0);  // Motor 1 commands never energized Motor 2.
+
+  // Motor 2 uses its own wiring and sequence while Motor 1 is stopped.
+  command('2');
+  command('f');
+  for (unsigned step = 0; step < 4096; ++step) {
+    tick();
+    assert(mask2() == forward[step % 8]);
+    assert(mask() == 0);
+  }
+  tick();
+  assert(mask2() == 0);
+
+  // A finite reverse move on Motor 2 completes without stopping Motor 1.
+  command('1');
+  command('r');
+  command('2');
+  command('b');
+  writes.clear();
+  for (unsigned step = 0; step < 4096; ++step) {
+    tick();
+    assert(mask() != 0 && mask2() == backward[step % 8]);
+  }
+  assert(writes.size() == 4096 * 8);
+  tick();
+  assert(mask() != 0 && mask2() == 0);
+  command('r');
+  tick();
+  assert(mask() != 0 && mask2() != 0);
+  command('s');
+  assert(mask() == 0 && mask2() == 0);
+  writes.clear();
+  tick();
+  assert(writes.empty());
+  std::cout << "PASS: phases, finite moves, stop, timing, acceleration, two independent motors\n";
 }
