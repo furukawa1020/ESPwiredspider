@@ -1,6 +1,22 @@
-# ESP32 DC XYZ
+﻿# ESP32 DC XYZ
 
-ESP32は外部の中央サーバーへWi-Fi / WSSで接続します。HTTP APIは別のリポジトリの中央サーバーに実装してください。このファームウェア自身はHTTPサーバーを提供しません。既存のルートのステッピングモーター用プログラム、server/の旧APIとは別のプロジェクトです。
+ESP32は直接HTTPと、外部の中央サーバー経由のWi-Fi / WSSの両方に対応します。中央サーバーのHTTP APIは別のリポジトリに実装してください。既存のルートのステッピングモーター用プログラム、server/の旧APIとは別のプロジェクトです。
+
+## ESP32へ直接HTTP
+
+Wi-Fi未設定の場合、ESP32は `Rail-ESP32-...` というアクセスポイントを起動します。USBシリアル115200bpsで `access` と改行を送るとSSID・Wi-Fiパスワード・APIトークンを取得できます。APIトークンとAPパスワードは再起動ごとに変わります。接続後のURLは `http://192.168.4.1`。Wi-Fi設定済みの場合は `status` に表示されるESP32のLAN IPを使います。
+
+```http
+POST http://192.168.4.1/api/v1/rail/move
+Authorization: Bearer <accessで取得したapi_token>
+Content-Type: application/json
+
+{"axis":"x","direction":1,"duration_ms":500}
+```
+
+応答は202 `{"command_id":"http-...","status":"accepted"}`。これはキューへの受付であり、実際の走行完了の保証ではありません。`GET /api/v1/rail/status` で各軸の出力状態・残時間を取得できます。`POST /api/v1/rail/stop` に `{"axis":null}` で全軸停止、`{"axis":"x"}` で指定軸停止。すべて同じBearerトークンが必要です。
+
+直接HTTPで開始した動作は中央サーバーに接続していなくても実行され、指定時間で出力が停止します。同じ軸は経路を問わず最後に受け付けた指令で置き換わります。直接HTTPは信頼できるLAN/AP内で使い、インターネットへの公開には中央サーバーのHTTPSを使用してください。
 
 ## 中央サーバーのREST契約
 
@@ -37,7 +53,7 @@ ESP32が `wss://<server_host>:443/ws/device` に `Authorization: Bearer <device_
 3. ESP32は毎秒 `{"type":"heartbeat"}` を送信。サーバーは `{"type":"heartbeat","server_time_ms":<現在のUNIXミリ秒>}` を返信します。
 4. ESP32 → イベント: `{"type":"event","command_id":"...","status":"started","message":"..."}`。statusはstarted/completed/stopped/failed。
 
-サーバー時刻とNTP時刻の差が5秒未満の応答で接続を有効化します。切断または2秒間の応答途絶で全軸の出力を停止します。ネットワーク処理とモーターの時間制御は別タスクです。直近32件のcommand_idを記憶し重複実行を防ぎます。置換された旧指令の状態は中央サーバー側でも更新してください。
+サーバー時刻とNTP時刻の差が5秒未満の応答で接続を有効化します。切断または2秒間の応答途絶で中央サーバーから開始した軸の出力を停止します。ネットワーク処理とモーターの時間制御は別タスクです。直近32件のcommand_idを記憶し重複実行を防ぎます。置換された旧指令の状態は中央サーバー側でも更新してください。
 
 ## 配線（TB6612FNG × 2）
 
@@ -61,6 +77,7 @@ config.example.jsonをconfig.local.jsonへコピーし、Wi-Fi、中央サーバ
 & "$env:USERPROFILE\.platformio\penv\Scripts\python.exe" scripts/configure-dc.py --port COM11 --file firmware/rail_dc/config.local.json --ca root-ca.pem
 ```
 
-設定はESP32のNVSに保存され再起動します。未設定では接続も動作もしません。TLS証明書検証を有効にしており、自己署名の場合も適切なCAが必要です。シリアル115200bpsで `status` と改行を送ると状態JSON、`stop` と改行で停止します。接続設定はシリアルのconfigure JSONでも可能です。
+設定はESP32のNVSに保存され再起動します。未設定では中央サーバーに接続せず、直接HTTP用のAPを起動します。TLS証明書検証を有効にしており、自己署名の場合も適切なCAが必要です。シリアル115200bpsで `status` と改行を送ると状態JSON、`stop` と改行で停止します。接続設定はシリアルのconfigure JSONでも可能です。
 
 単体テスト: `g++ -std=c++11 -Wall -Wextra -Werror firmware/rail_dc/test/controller_test.cpp -o .pio/dc_controller_test.exe` でコンパイルし実行します。これは制御ロジックのテストであり、実配線・走行や外部サーバーとの結合を確認するものではありません。
+
