@@ -5,10 +5,15 @@
 #include <WebSocketsClient.h>
 #include <WebServer.h>
 #include <sys/time.h>
+#include <driver/rmt.h>
 #include "controller.h"
 
 namespace {
-constexpr uint8_t PINS[3][3] = {{13,14,16}, {18,19,21}, {25,26,27}};
+constexpr uint8_t PINS[3][3] = {{13,14,32}, {18,19,21}, {25,26,27}};
+constexpr bool MOTOR_OUTPUTS_ENABLED = false; // LED preview until DC hardware is installed.
+constexpr uint8_t RGB_PIN = 16;
+bool rgbReady = false;
+uint32_t lastRgb = UINT32_MAX;
 constexpr uint8_t STANDBY = 23;
 constexpr uint8_t DUTY = 128; // 50% for initial DC motor commissioning.
 QueueHandle_t commandQueue, eventQueue, snapshotQueue;
@@ -17,14 +22,14 @@ bool ready = false;
 uint32_t lastPong = 0;
 uint8_t activeOutputs = 0;
 struct Event { char id[64]; char status[16]; char message[80]; };
-struct Snapshot { bool active[3]; bool pending[3]; int8_t direction[3]; uint32_t remainingMs[3]; };
+struct Snapshot { bool active[3]; bool pending[3]; int8_t direction[3]; uint32_t remainingMs[3]; uint8_t rgb[3]; };
 struct Config { String ssid, password, host, path, token, deviceId, ca; uint16_t port = 443; };
 Config cfg;
 WebSocketsClient ws;
 bool configured = false, socketStarted = false, wifiStarted = false;
 String authHeader;
 WebServer http(80);
-String localToken, apName, apPassword;
+String apName, apPassword;
 
 uint64_t utcMs() {
   timeval tv;
@@ -51,6 +56,7 @@ void report(const char* id, const char* status, const char* message) {
   xQueueSend(eventQueue, &event, 0);
 }
 void release(uint8_t axis) {
+  if (!MOTOR_OUTPUTS_ENABLED) return;
   ledcWrite(axis, 0);
   digitalWrite(PINS[axis][0], HIGH);
   digitalWrite(PINS[axis][1], HIGH);
@@ -64,6 +70,7 @@ void release(uint8_t axis) {
   }
 }
 void drive(uint8_t axis, int8_t direction) {
+  if (!MOTOR_OUTPUTS_ENABLED) return;
   ledcWrite(axis, 0);
   digitalWrite(PINS[axis][0], direction > 0 ? HIGH : LOW);
   digitalWrite(PINS[axis][1], direction > 0 ? LOW : HIGH);
@@ -72,6 +79,20 @@ void drive(uint8_t axis, int8_t direction) {
   ledcWrite(axis, DUTY);
 }
 rail::Controller controller({drive, release, report});
+
+void showRgb(uint8_t r, uint8_t g, uint8_t b) {
+  const uint32_t grb = (static_cast<uint32_t>(g) << 16) | (static_cast<uint32_t>(r) << 8) | b;
+  if (!rgbReady || grb == lastRgb) return;
+  // APB 80 MHz / 2 = 25 ns per tick. WS2812 GRB, 1.25 us per bit.
+  rmt_item32_t bits[24] = {};
+  for (unsigned i = 0; i < 24; ++i) {
+    const bool one = grb & (1u << (23 - i));
+    bits[i].level0 = 1; bits[i].duration0 = one ? 28 : 14;
+    bits[i].level1 = 0; bits[i].duration1 = one ? 22 : 36;
+  }
+  bits[23].duration1 += 12000; // 300 us reset/latch interval.
+  if (rmt_write_items(RMT_CHANNEL_0, bits, 24, true) == ESP_OK) lastRgb = grb;
+}
 
 bool plain(const String& value) { return value.indexOf('\r') < 0 && value.indexOf('\n') < 0; }
 bool loadConfig(JsonVariantConst root, Config& out) {
@@ -101,15 +122,23 @@ bool loadConfig(JsonVariantConst root, Config& out) {
 String statusJson() {
   Snapshot snapshot{};
   xQueuePeek(snapshotQueue, &snapshot, 0);
-  StaticJsonDocument<768> doc;
+  StaticJsonDocument<1280> doc;
   doc["type"] = "status";
   doc["firmware"] = "rail-dc-xyz-1.0";
+  doc["mode"] = MOTOR_OUTPUTS_ENABLED ? "motor" : "led_preview";
+  doc["simulated"] = !MOTOR_OUTPUTS_ENABLED;
+  doc["rgb_led_ready"] = rgbReady;
+  auto rgb = doc.createNestedArray("led_rgb");
+  for (uint8_t value : snapshot.rgb) rgb.add(value);
   doc["configured"] = configured;
   doc["wifi_connected"] = WiFi.status() == WL_CONNECTED;
   doc["server_connected"] = linkHealthy();
   doc["pwm_duty"] = DUTY;
   doc["standby_pin_high"] = digitalRead(STANDBY) == HIGH;
   doc["http_port"] = 80;
+  doc["http_auth_required"] = false;
+  doc["ap_ip"] = WiFi.softAPIP().toString();
+  doc["ap_ssid"] = apName;
   doc["ip"] = configured ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
   auto axes = doc.createNestedArray("axes");
   for (int i = 0; i < 3; ++i) {
@@ -117,6 +146,7 @@ String statusJson() {
     a["axis"] = i == 0 ? "x" : i == 1 ? "y" : "z";
     a["active"] = snapshot.active[i];
     a["pending"] = snapshot.pending[i];
+    a["direction"] = snapshot.direction[i];
     a["remaining_ms"] = snapshot.remainingMs[i];
   }
   String result;
@@ -133,14 +163,7 @@ void localStop() {
   xQueueSend(commandQueue, &cmd, 0);
 }
 
-bool httpAuthorized() {
-  if (http.header("Authorization") == "Bearer " + localToken) return true;
-  http.send(401, "application/json", "{\"error\":\"unauthorized\"}");
-  return false;
-}
-
 void httpCommand(bool stopping) {
-  if (!httpAuthorized()) return;
   StaticJsonDocument<512> doc;
   if (!http.header("Content-Type").startsWith("application/json") ||
       http.arg("plain").length() > 512 || deserializeJson(doc, http.arg("plain")) ||
@@ -174,12 +197,12 @@ void httpCommand(bool stopping) {
 }
 
 void httpTask(void*) {
-  const char* headers[] = {"Authorization", "Content-Type"};
-  http.collectHeaders(headers, 2);
+  const char* headers[] = {"Content-Type"};
+  http.collectHeaders(headers, 1);
   http.on("/api/v1/rail/move", HTTP_POST, [] { httpCommand(false); });
   http.on("/api/v1/rail/stop", HTTP_POST, [] { httpCommand(true); });
   http.on("/api/v1/rail/status", HTTP_GET, [] {
-    if (httpAuthorized()) http.send(200, "application/json", statusJson());
+    http.send(200, "application/json", statusJson());
   });
   http.onNotFound([] { http.send(404, "application/json", "{\"error\":\"not found\"}"); });
   http.begin();
@@ -189,8 +212,7 @@ void httpTask(void*) {
 void processSerialLine(const String& text) {
   if (text == "access") {
     StaticJsonDocument<512> doc;
-    doc["api_token"] = localToken;
-    if (!configured) { doc["ssid"] = apName; doc["password"] = apPassword; }
+    doc["ssid"] = apName; doc["password"] = apPassword;
     serializeJson(doc, Serial); Serial.println(); return;
   }
   if (text == "?" || text == "status") { printStatus(); return; }
@@ -238,7 +260,7 @@ void onWebSocket(WStype_t type, uint8_t* data, size_t length) {
     StaticJsonDocument<256> hello;
     hello["type"] = "hello";
     hello["device_id"] = cfg.deviceId;
-    hello["simulated"] = false;
+    hello["simulated"] = !MOTOR_OUTPUTS_ENABLED;
     auto axes = hello.createNestedArray("axes");
     axes.add("x"); axes.add("y"); axes.add("z");
     String payload;
@@ -298,15 +320,21 @@ void networkTask(void*) {
   }
   Serial.println("RAIL DC XYZ v1.0 ready. Outputs stopped; STBY LOW.");
   char randomKey[33];
-  snprintf(randomKey, sizeof(randomKey), "%08x%08x%08x%08x", esp_random(), esp_random(), esp_random(), esp_random());
-  localToken = randomKey;
-  if (!configured) {
-    apName = "Rail-ESP32-" + String(static_cast<uint32_t>(ESP.getEfuseMac()), HEX);
-    apPassword = localToken.substring(0, 16);
-    WiFi.mode(WIFI_AP);
-    WiFi.softAP(apName.c_str(), apPassword.c_str());
+  snprintf(randomKey, sizeof(randomKey), "%08x%08x", esp_random(), esp_random());
+  apPassword = randomKey;
+  if (preferences.begin("rail-dc", false)) {
+    apPassword = preferences.getString("ap-password", apPassword);
+    if (!preferences.putString("ap-password", apPassword))
+      Serial.println("Local access credentials could not be persisted");
+    preferences.end();
+  } else {
+    Serial.println("Local access credentials are temporary: NVS unavailable");
   }
-  Serial.println("HTTP API enabled. Serial command 'access' shows this boot's API token and AP credentials.");
+  apName = "Rail-ESP32-" + String(static_cast<uint32_t>(ESP.getEfuseMac()), HEX);
+  WiFi.mode(WIFI_AP_STA);
+  if (!WiFi.softAP(apName.c_str(), apPassword.c_str()))
+    Serial.println("Access point startup failed");
+  Serial.println("HTTP API enabled. Always-on AP; serial 'access' shows saved credentials.");
   if (xTaskCreatePinnedToCore(httpTask, "rail-http", 10000, nullptr, 1, nullptr, 0) != pdPASS)
     Serial.println("HTTP task failed to start");
   printStatus();
@@ -330,7 +358,6 @@ void networkTask(void*) {
       }
     }
     if (configured && !wifiStarted) {
-      WiFi.mode(WIFI_STA);
       WiFi.setAutoReconnect(true);
       WiFi.begin(cfg.ssid.c_str(), cfg.password.c_str());
       configTime(0, 0, "pool.ntp.org", "time.google.com");
@@ -378,6 +405,17 @@ void setup() {
     ledcWrite(i, 0);
   }
   Serial.begin(115200);
+  rmt_config_t rgbConfig = RMT_DEFAULT_CONFIG_TX(GPIO_NUM_16, RMT_CHANNEL_0);
+  rgbConfig.clk_div = 2;
+  rgbReady = rmt_config(&rgbConfig) == ESP_OK &&
+             rmt_driver_install(RMT_CHANNEL_0, 0, 0) == ESP_OK;
+  if (rgbReady) {
+    // Short power-on color check, with all motor outputs still disabled.
+    showRgb(40, 0, 0); delay(250);
+    showRgb(0, 40, 0); delay(250);
+    showRgb(0, 0, 40); delay(250);
+    showRgb(0, 0, 0);
+  } else Serial.println("RGB LED initialization failed");
   commandQueue = xQueueCreate(16, sizeof(rail::Command));
   eventQueue = xQueueCreate(64, sizeof(Event));
   snapshotQueue = xQueueCreate(1, sizeof(Snapshot));
@@ -409,7 +447,9 @@ void loop() {
     snapshot.direction[i] = axis.direction;
     const uint32_t elapsed = now - axis.since;
     snapshot.remainingMs[i] = axis.active && elapsed < axis.durationMs ? axis.durationMs - elapsed : 0;
+    snapshot.rgb[i] = axis.active && (axis.direction > 0 || ((elapsed / 150) % 2 == 0)) ? 40 : 0;
   }
+  showRgb(snapshot.rgb[0], snapshot.rgb[1], snapshot.rgb[2]);
   xQueueOverwrite(snapshotQueue, &snapshot);
   delay(1);
 }
