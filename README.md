@@ -1,5 +1,8 @@
 # ESP32 + ULN2003 + 28BYJ-48 動作確認
 
+モノレール向けの外部中央サーバー用REST APIは [`server/README.md`](server/README.md) を参照してください。
+`POST /api/v1/move` でX/Y/Z・増減方向・秒数を指定します。以下は既存のステッピングモータ試験用ファームウェアの説明です。
+
 ESP32 DevKitC / ESP-WROOM-32 向けの、モータ2台用PlatformIOプロジェクトです。
 Arduinoフレームワークを使用し、外部ライブラリは不要です。
 ビルド環境は公式Espressif32 6.12.0に固定し、依存パッケージを `.pio/packages` に保存します。

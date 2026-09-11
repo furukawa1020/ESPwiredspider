@@ -155,4 +155,5 @@ ESP32ファームウェアで実装する動作契約：
 ```
 
 HTTP呼び出しと模擬ESP32のWebSocketを実際に接続して検証します。実物のモータを動かすテストではありません。
+2026-09-11に11テスト成功（FastAPI 0.141.1 / Python 3.11）。外部サーバーへの公開とDCモータ実機との接続は未実施です。
 実装には [FastAPIのWebSocket機能](https://fastapi.tiangolo.com/advanced/websockets/) と [lifespan](https://fastapi.tiangolo.com/advanced/events/) を使用しています。
