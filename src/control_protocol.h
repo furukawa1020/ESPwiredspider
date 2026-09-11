@@ -6,12 +6,12 @@
 #include <errno.h>
 #include <ctype.h>
 
-enum class CommandType { Run, Move, Stop, Speed, Alternate };
+enum class CommandType { Run, Move, Stop, Speed, Alternate, Timed };
 struct ControlCommand { CommandType type; uint8_t target; int32_t value; };
 struct MotorTelemetry {
   uint8_t id, mode;
   int8_t direction;
-  uint32_t intervalUs, currentIntervalUs, remaining;
+  uint32_t intervalUs, currentIntervalUs, remaining, timedRemainingMs;
   int64_t position;
   uint64_t total;
 };
@@ -56,6 +56,10 @@ inline bool parseControlCommand(const char* input, ControlCommand& result) {
     return true;
   }
   if (count != 2) return false;
+  if (!strcmp(verb, "timed") && args[1] != 0 && args[1] >= -60000 && args[1] <= 60000) {
+    result = {CommandType::Timed, target, static_cast<int32_t>(args[1])};
+    return true;
+  }
   if (!strcmp(verb, "run") && (args[1] == 1 || args[1] == -1)) {
     result = {CommandType::Run, target, static_cast<int32_t>(args[1])};
     return true;
@@ -76,12 +80,12 @@ inline void formatState(const DeviceTelemetry& s, char* output, size_t size) {
   const auto& b = s.motors[1];
   snprintf(output, size,
     "{\"type\":\"state\",\"sequence\":%lu,\"uptime_ms\":%lu,\"alternating\":%s,\"period_ms\":%lu,"
-    "\"motors\":[{\"id\":1,\"mode\":%u,\"direction\":%d,\"interval_us\":%lu,\"current_interval_us\":%lu,\"remaining\":%lu,\"position_steps\":%lld,\"total_steps\":%llu},"
-    "{\"id\":2,\"mode\":%u,\"direction\":%d,\"interval_us\":%lu,\"current_interval_us\":%lu,\"remaining\":%lu,\"position_steps\":%lld,\"total_steps\":%llu}]}",
+    "\"motors\":[{\"id\":1,\"mode\":%u,\"direction\":%d,\"interval_us\":%lu,\"current_interval_us\":%lu,\"remaining\":%lu,\"timed_remaining_ms\":%lu,\"position_steps\":%lld,\"total_steps\":%llu},"
+    "{\"id\":2,\"mode\":%u,\"direction\":%d,\"interval_us\":%lu,\"current_interval_us\":%lu,\"remaining\":%lu,\"timed_remaining_ms\":%lu,\"position_steps\":%lld,\"total_steps\":%llu}]}",
     static_cast<unsigned long>(s.sequence), static_cast<unsigned long>(s.uptimeMs),
     s.alternating ? "true" : "false", static_cast<unsigned long>(s.periodMs),
     a.mode, a.direction, static_cast<unsigned long>(a.intervalUs), static_cast<unsigned long>(a.currentIntervalUs),
-    static_cast<unsigned long>(a.remaining), static_cast<long long>(a.position), static_cast<unsigned long long>(a.total),
+    static_cast<unsigned long>(a.remaining), static_cast<unsigned long>(a.timedRemainingMs), static_cast<long long>(a.position), static_cast<unsigned long long>(a.total),
     b.mode, b.direction, static_cast<unsigned long>(b.intervalUs), static_cast<unsigned long>(b.currentIntervalUs),
-    static_cast<unsigned long>(b.remaining), static_cast<long long>(b.position), static_cast<unsigned long long>(b.total));
+    static_cast<unsigned long>(b.remaining), static_cast<unsigned long>(b.timedRemainingMs), static_cast<long long>(b.position), static_cast<unsigned long long>(b.total));
 }
