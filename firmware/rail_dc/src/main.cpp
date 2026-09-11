@@ -165,7 +165,7 @@ void onWebSocket(WStype_t type, uint8_t* data, size_t length) {
     hello["device_id"] = cfg.deviceId;
     hello["simulated"] = false;
     auto axes = hello.createNestedArray("axes");
-    axes.add("X"); axes.add("Y"); axes.add("Z");
+    axes.add("x"); axes.add("y"); axes.add("z");
     String payload;
     serializeJson(hello, payload);
     ws.sendTXT(payload);
@@ -192,7 +192,9 @@ void onWebSocket(WStype_t type, uint8_t* data, size_t length) {
   strcpy(cmd.id, id);
   cmd.stop = stopping;
   const char* axis = doc["axis"] | "";
-  cmd.axis = !strcmp(axis,"X") ? 0 : !strcmp(axis,"Y") ? 1 : !strcmp(axis,"Z") ? 2 : -1;
+  cmd.axis = (!strcmp(axis,"x") || !strcmp(axis,"X")) ? 0 :
+             (!strcmp(axis,"y") || !strcmp(axis,"Y")) ? 1 :
+             (!strcmp(axis,"z") || !strcmp(axis,"Z")) ? 2 : -1;
   if (cmd.axis == -1 && (!stopping || !doc["axis"].isNull())) {
     report(id, "failed", "Invalid axis"); return;
   }
