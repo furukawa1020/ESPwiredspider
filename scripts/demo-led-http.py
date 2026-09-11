@@ -16,7 +16,9 @@ opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def netsh(*args):
-    return subprocess.run(["netsh", "wlan", *args], capture_output=True, check=True)
+    result = subprocess.run(["netsh", "wlan", *args], capture_output=True, check=True)
+    print(result.stdout.decode(errors="replace"), flush=True)
+    return result
 
 
 def request(path, data=None):
@@ -84,7 +86,11 @@ try:
         ET.ElementTree(root).write(profile_file, encoding="utf-8", xml_declaration=True)
         netsh("add", "profile", "filename=" + str(profile_file), "user=current")
         added = True
-    netsh("connect", "name=" + PROFILE, "interface=" + INTERFACE)
+    netsh("disconnect", "interface=" + INTERFACE)
+    time.sleep(1)
+    netsh("connect", "name=" + PROFILE, "ssid=" + access["ssid"], "interface=" + INTERFACE)
+    time.sleep(4)
+    netsh("show", "interfaces")
     deadline = time.monotonic() + 25
     while True:
         try:
