@@ -155,7 +155,7 @@ int main() {
   writes.clear();
   tick();
   assert(writes.empty());
-  // Five-second alternation survives clock wrap; both motors reverse phases.
+  // Ten-second alternation survives clock wrap; both motors reverse phases.
   clockUs = UINT32_MAX - 1000000;
   Serial.output.clear();
   command('a');
@@ -164,7 +164,7 @@ int main() {
   const unsigned beforeReverse1 = mask();
   const unsigned beforeReverse2 = mask2();
   tick(1);
-  assert(Serial.output.find("Both: backward (5 seconds)") != std::string::npos);
+  assert(Serial.output.find("Both: backward (10 seconds)") != std::string::npos);
   tick(START_INTERVAL_US);
   const unsigned phaseOrder[] = {1, 3, 2, 6, 4, 12, 8, 9};
   for (unsigned i = 0; i < 8; ++i) {
@@ -175,7 +175,7 @@ int main() {
   tick(DIRECTION_INTERVAL_US - START_INTERVAL_US - 1);
   assert(Serial.output.empty());
   tick(1);
-  assert(Serial.output.find("Both: forward (5 seconds)") != std::string::npos);
+  assert(Serial.output.find("Both: forward (10 seconds)") != std::string::npos);
   command('s');
   writes.clear();
   Serial.output.clear();
@@ -193,5 +193,5 @@ int main() {
   tick(DIRECTION_INTERVAL_US);
   assert(mask2() == 0 && Serial.output.empty());
   command('s');
-  std::cout << "PASS: motor phases, timing, acceleration, independent control, 5-second alternation and cancellation\n";
+  std::cout << "PASS: motor phases, timing, acceleration, independent control, 10-second alternation and cancellation\n";
 }

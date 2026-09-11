@@ -5,8 +5,8 @@ namespace {
 constexpr uint8_t MOTOR_PINS[4] = {13, 14, 16, 17};
 constexpr uint8_t MOTOR2_PINS[4] = {18, 19, 21, 22};
 constexpr uint32_t STEPS_PER_REV = 4096;  // Approximate; calibrate on hardware.
-constexpr uint32_t STEP_INTERVAL_US = 2000;
-constexpr uint32_t DIRECTION_INTERVAL_US = 5000000;
+constexpr uint32_t STEP_INTERVAL_US = 500;
+constexpr uint32_t DIRECTION_INTERVAL_US = 10000000;
 constexpr uint32_t START_INTERVAL_US = 2000;
 constexpr uint32_t ACCELERATION_US_PER_STEP = 2;
 constexpr uint8_t HALF_STEP_SEQUENCE[8][4] = {
@@ -120,8 +120,8 @@ uint32_t lastDirectionChangeUs = 0;
 void runBoth(int8_t direction) {
   motor.run(direction);
   motor2.run(direction);
-  Serial.println(direction > 0 ? "Both: forward (5 seconds)"
-                               : "Both: backward (5 seconds)");
+  Serial.println(direction > 0 ? "Both: forward (10 seconds)"
+                               : "Both: backward (10 seconds)");
 }
 
 void cancelAlternating() {
@@ -144,7 +144,7 @@ void updateAlternating(uint32_t nowUs) {
 void printHelp() {
   Serial.println("=== 28BYJ-48 Motor Test ===");
   Serial.println("1 / 2 : select motor (default: Motor 1)");
-  Serial.println("a : BOTH motors alternate forward/backward every 5 seconds");
+  Serial.println("a : BOTH motors alternate forward/backward every 10 seconds");
   Serial.println("f : forward ~1 revolution (4096 half-steps)");
   Serial.println("b : backward ~1 revolution (4096 half-steps)");
   Serial.println("r : continuous forward");
