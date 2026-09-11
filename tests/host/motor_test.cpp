@@ -155,5 +155,43 @@ int main() {
   writes.clear();
   tick();
   assert(writes.empty());
-  std::cout << "PASS: phases, finite moves, stop, timing, acceleration, two independent motors\n";
+  // Five-second alternation survives clock wrap; both motors reverse phases.
+  clockUs = UINT32_MAX - 1000000;
+  Serial.output.clear();
+  command('a');
+  tick(DIRECTION_INTERVAL_US - 1);
+  assert(Serial.output.find("Both: backward") == std::string::npos);
+  const unsigned beforeReverse1 = mask();
+  const unsigned beforeReverse2 = mask2();
+  tick(1);
+  assert(Serial.output.find("Both: backward (5 seconds)") != std::string::npos);
+  tick(START_INTERVAL_US);
+  const unsigned phaseOrder[] = {1, 3, 2, 6, 4, 12, 8, 9};
+  for (unsigned i = 0; i < 8; ++i) {
+    if (phaseOrder[i] == beforeReverse1) assert(mask() == phaseOrder[(i + 7) % 8]);
+    if (phaseOrder[i] == beforeReverse2) assert(mask2() == phaseOrder[(i + 7) % 8]);
+  }
+  Serial.output.clear();
+  tick(DIRECTION_INTERVAL_US - START_INTERVAL_US - 1);
+  assert(Serial.output.empty());
+  tick(1);
+  assert(Serial.output.find("Both: forward (5 seconds)") != std::string::npos);
+  command('s');
+  writes.clear();
+  Serial.output.clear();
+  tick(DIRECTION_INTERVAL_US * 3);
+  assert(mask() == 0 && mask2() == 0 && writes.empty() && Serial.output.empty());
+
+  // A manual move cancels the repeating mode and stops the other motor.
+  command('a');
+  tick();
+  command('1');
+  command('r');
+  tick();
+  assert(mask() != 0 && mask2() == 0);
+  Serial.output.clear();
+  tick(DIRECTION_INTERVAL_US);
+  assert(mask2() == 0 && Serial.output.empty());
+  command('s');
+  std::cout << "PASS: motor phases, timing, acceleration, independent control, 5-second alternation and cancellation\n";
 }

@@ -6,6 +6,7 @@ constexpr uint8_t MOTOR_PINS[4] = {13, 14, 16, 17};
 constexpr uint8_t MOTOR2_PINS[4] = {18, 19, 21, 22};
 constexpr uint32_t STEPS_PER_REV = 4096;  // Approximate; calibrate on hardware.
 constexpr uint32_t STEP_INTERVAL_US = 2000;
+constexpr uint32_t DIRECTION_INTERVAL_US = 5000000;
 constexpr uint32_t START_INTERVAL_US = 2000;
 constexpr uint32_t ACCELERATION_US_PER_STEP = 2;
 constexpr uint8_t HALF_STEP_SEQUENCE[8][4] = {
@@ -112,16 +113,44 @@ class HalfStepMotor {
 HalfStepMotor motor(MOTOR_PINS, STEP_INTERVAL_US);
 HalfStepMotor motor2(MOTOR2_PINS, STEP_INTERVAL_US);
 HalfStepMotor* selectedMotor = &motor;
+bool alternating = false;
+int8_t alternatingDirection = 1;
+uint32_t lastDirectionChangeUs = 0;
+
+void runBoth(int8_t direction) {
+  motor.run(direction);
+  motor2.run(direction);
+  Serial.println(direction > 0 ? "Both: forward (5 seconds)"
+                               : "Both: backward (5 seconds)");
+}
+
+void cancelAlternating() {
+  if (alternating) {
+    alternating = false;
+    motor.stop();
+    motor2.stop();
+  }
+}
+
+void updateAlternating(uint32_t nowUs) {
+  if (alternating &&
+      static_cast<uint32_t>(nowUs - lastDirectionChangeUs) >= DIRECTION_INTERVAL_US) {
+    lastDirectionChangeUs = nowUs;
+    alternatingDirection = -alternatingDirection;
+    runBoth(alternatingDirection);
+  }
+}
 
 void printHelp() {
   Serial.println("=== 28BYJ-48 Motor Test ===");
   Serial.println("1 / 2 : select motor (default: Motor 1)");
+  Serial.println("a : BOTH motors alternate forward/backward every 5 seconds");
   Serial.println("f : forward ~1 revolution (4096 half-steps)");
   Serial.println("b : backward ~1 revolution (4096 half-steps)");
   Serial.println("r : continuous forward");
   Serial.println("l : continuous backward");
   Serial.println("s : stop BOTH motors / coils off");
-  Serial.println("Motion commands apply to the selected motor only.");
+  Serial.println("f/b/r/l cancel alternation, stop both, then operate the selected motor.");
   Serial.println("New motion commands replace the current move.");
 }
 
@@ -130,6 +159,13 @@ void handleSerial() {
   for (uint8_t count = 0; count < 16 && Serial.available() > 0; ++count) {
     const char command = static_cast<char>(Serial.read());
     switch (command) {
+      case 'a':
+      case 'A':
+        alternating = true;
+        alternatingDirection = 1;
+        lastDirectionChangeUs = micros();
+        runBoth(alternatingDirection);
+        break;
       case '1':
         selectedMotor = &motor;
         Serial.println("Selected Motor 1");
@@ -140,26 +176,31 @@ void handleSerial() {
         break;
       case 'f':
       case 'F':
+        cancelAlternating();
         selectedMotor->move(1, STEPS_PER_REV);
         Serial.println("Forward: ~1 revolution");
         break;
       case 'b':
       case 'B':
+        cancelAlternating();
         selectedMotor->move(-1, STEPS_PER_REV);
         Serial.println("Backward: ~1 revolution");
         break;
       case 'r':
       case 'R':
+        cancelAlternating();
         selectedMotor->run(1);
         Serial.println("Continuous forward");
         break;
       case 'l':
       case 'L':
+        cancelAlternating();
         selectedMotor->run(-1);
         Serial.println("Continuous backward");
         break;
       case 's':
       case 'S':
+        alternating = false;
         motor.stop();
         motor2.stop();
         Serial.println("STOP: coils off");
@@ -189,6 +230,7 @@ void setup() {
 
 void loop() {
   handleSerial();
+  updateAlternating(micros());
   const uint32_t nowUs = micros();
   if (motor.update(nowUs)) {
     Serial.println("Motor 1");
