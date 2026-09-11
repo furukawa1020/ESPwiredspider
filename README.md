@@ -2,6 +2,8 @@
 
 ESP32 DevKitC / ESP-WROOM-32 向けの、モータ1台用PlatformIOプロジェクトです。
 Arduinoフレームワークを使用し、外部ライブラリは不要です。
+ビルド環境は公式Espressif32 6.12.0に固定し、依存パッケージを `.pio/packages` に保存します。
+初回ビルド時はツールチェーンとArduinoフレームワークのダウンロードが必要です。
 `board = esp32dev` は [PlatformIO公式のボード設定](https://docs.platformio.org/en/stable/boards/espressif32/esp32dev.html)に準拠しています。
 
 ## 配線
@@ -64,3 +66,16 @@ pio device monitor
 `HalfStepMotor` にピン・相・残りステップ数・タイミングをまとめています。
 将来はモータごとにインスタンスを追加し、`loop()` で各 `update()` を呼び出せます。
 現在の対象はモータ1台のみで、Wi-Fi・BLE・XYZ制御は実装していません。
+
+## PC上の制御ロジック検証
+
+GCCのC++コンパイラがある場合、PowerShellで次を実行できます。
+
+```powershell
+New-Item -ItemType Directory -Force .pio | Out-Null
+g++ -std=c++11 -Wall -Wextra -Werror -I tests/host tests/host/motor_test.cpp -o .pio/motor_host_test.exe
+if ($LASTEXITCODE -eq 0) { & .\.pio\motor_host_test.exe }
+```
+
+GPIO出力と時計を模擬し、正逆の相順序、4096ステップ、最終相の保持、
+途中停止、指令の置き換え、タイマー周回を確認します。実機の回転確認は別途必要です。
