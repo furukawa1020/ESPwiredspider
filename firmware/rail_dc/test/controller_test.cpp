@@ -44,7 +44,15 @@ int main() {
   c.apply(local, 11000, 11001);
   c.apply(move("remote-ws", 1, 1, 3000), 11000, 11001);
   c.stopAll("link lost", true);
+  assert(outputs[0] == 0 && c.axis(0).pending);
+  c.tick(11050, 11051);
   assert(outputs[0] == 1 && outputs[1] == 0);
-  c.tick(11500, 11501); assert(outputs[0] == 0);
+  c.tick(11550, 11551); assert(outputs[0] == 0);
+  c.apply(move("reverse-after-stop",0,-1,500),12000,12001);
+  assert(outputs[0] == 0 && c.axis(0).pending);
+  c.apply(move("replace-pending-reverse",0,-1,500),12010,12011);
+  c.tick(12059,12060); assert(outputs[0] == 0);
+  c.tick(12060,12061); assert(outputs[0] == -1);
+  c.tick(12560,12561); assert(outputs[0] == 0);
   std::cout << "PASS: timed stop, replacement, reversal delay, independent axes, deduplication, expiry, timer wrap, link stop\n";
 }

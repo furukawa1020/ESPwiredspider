@@ -9,18 +9,16 @@
 #include "controller.h"
 
 namespace {
-constexpr uint8_t PINS[3][3] = {{13,14,32}, {18,19,21}, {25,26,27}};
-constexpr bool MOTOR_OUTPUTS_ENABLED = false; // LED preview until DC hardware is installed.
+constexpr uint8_t MOTOR_IN1 = 18;
+constexpr uint8_t MOTOR_IN2 = 19;
 constexpr uint8_t RGB_PIN = 16;
 bool rgbReady = false;
 uint32_t lastRgb = UINT32_MAX;
 constexpr uint8_t STANDBY = 23;
-constexpr uint8_t DUTY = 128; // 50% for initial DC motor commissioning.
 QueueHandle_t commandQueue, eventQueue, snapshotQueue;
 portMUX_TYPE linkLock = portMUX_INITIALIZER_UNLOCKED;
 bool ready = false;
 uint32_t lastPong = 0;
-uint8_t activeOutputs = 0;
 struct Event { char id[64]; char status[16]; char message[80]; };
 struct Snapshot { bool active[3]; bool pending[3]; int8_t direction[3]; uint32_t remainingMs[3]; uint8_t rgb[3]; };
 struct Config { String ssid, password, host, path, token, deviceId, ca; uint16_t port = 443; };
@@ -56,27 +54,14 @@ void report(const char* id, const char* status, const char* message) {
   xQueueSend(eventQueue, &event, 0);
 }
 void release(uint8_t axis) {
-  if (!MOTOR_OUTPUTS_ENABLED) return;
-  ledcWrite(axis, 0);
-  digitalWrite(PINS[axis][0], HIGH);
-  digitalWrite(PINS[axis][1], HIGH);
-  activeOutputs &= ~(1u << axis);
-  if (!activeOutputs) {
-    digitalWrite(STANDBY, LOW);
-    for (const auto& pins : PINS) {
-      digitalWrite(pins[0], LOW);
-      digitalWrite(pins[1], LOW);
-    }
-  }
+  if (axis != 0) return;
+  digitalWrite(MOTOR_IN1, LOW);
+  digitalWrite(MOTOR_IN2, LOW);
 }
 void drive(uint8_t axis, int8_t direction) {
-  if (!MOTOR_OUTPUTS_ENABLED) return;
-  ledcWrite(axis, 0);
-  digitalWrite(PINS[axis][0], direction > 0 ? HIGH : LOW);
-  digitalWrite(PINS[axis][1], direction > 0 ? LOW : HIGH);
-  activeOutputs |= 1u << axis;
-  digitalWrite(STANDBY, HIGH);
-  ledcWrite(axis, DUTY);
+  if (axis != 0) return;
+  release(axis);
+  digitalWrite(direction > 0 ? MOTOR_IN1 : MOTOR_IN2, HIGH);
 }
 rail::Controller controller({drive, release, report});
 
@@ -125,15 +110,18 @@ String statusJson() {
   StaticJsonDocument<1280> doc;
   doc["type"] = "status";
   doc["firmware"] = "rail-dc-xyz-1.0";
-  doc["mode"] = MOTOR_OUTPUTS_ENABLED ? "motor" : "led_preview";
-  doc["simulated"] = !MOTOR_OUTPUTS_ENABLED;
+  doc["mode"] = "dc_l9110s";
+  doc["simulated"] = false;
+  doc["driver"] = "L9110S";
+  doc["gpio18"] = digitalRead(MOTOR_IN1);
+  doc["gpio19"] = digitalRead(MOTOR_IN2);
   doc["rgb_led_ready"] = rgbReady;
   auto rgb = doc.createNestedArray("led_rgb");
   for (uint8_t value : snapshot.rgb) rgb.add(value);
   doc["configured"] = configured;
   doc["wifi_connected"] = WiFi.status() == WL_CONNECTED;
   doc["server_connected"] = linkHealthy();
-  doc["pwm_duty"] = DUTY;
+  doc["drive_mode"] = "high_low";
   doc["standby_pin_high"] = digitalRead(STANDBY) == HIGH;
   doc["http_port"] = 80;
   doc["http_auth_required"] = false;
@@ -144,6 +132,7 @@ String statusJson() {
   for (int i = 0; i < 3; ++i) {
     auto a = axes.createNestedObject();
     a["axis"] = i == 0 ? "x" : i == 1 ? "y" : "z";
+    a["available"] = i == 0;
     a["active"] = snapshot.active[i];
     a["pending"] = snapshot.pending[i];
     a["direction"] = snapshot.direction[i];
@@ -174,6 +163,9 @@ void httpCommand(bool stopping) {
   cmd.local = true; cmd.stop = stopping;
   const char* axis = doc["axis"] | "";
   cmd.axis = !strcmp(axis,"x") ? 0 : !strcmp(axis,"y") ? 1 : !strcmp(axis,"z") ? 2 : -1;
+  if (!stopping && cmd.axis != 0) {
+    http.send(422, "application/json", "{\"error\":\"Only axis x has a connected L9110S motor\"}"); return;
+  }
   if ((cmd.axis < 0 && (!stopping || !doc["axis"].isNull())) ||
       (!stopping && (!doc["direction"].is<int>() || !doc["duration_ms"].is<uint32_t>() ||
         (doc["direction"].as<int>() != 1 && doc["direction"].as<int>() != -1) ||
@@ -260,9 +252,9 @@ void onWebSocket(WStype_t type, uint8_t* data, size_t length) {
     StaticJsonDocument<256> hello;
     hello["type"] = "hello";
     hello["device_id"] = cfg.deviceId;
-    hello["simulated"] = !MOTOR_OUTPUTS_ENABLED;
+    hello["simulated"] = false;
     auto axes = hello.createNestedArray("axes");
-    axes.add("x"); axes.add("y"); axes.add("z");
+    axes.add("x");
     String payload;
     serializeJson(hello, payload);
     ws.sendTXT(payload);
@@ -296,6 +288,7 @@ void onWebSocket(WStype_t type, uint8_t* data, size_t length) {
     report(id, "failed", "Invalid axis"); return;
   }
   if (!stopping) {
+    if (cmd.axis != 0) { report(id, "failed", "Only axis x has a connected L9110S motor"); return; }
     if (!linkHealthy() || !doc["direction"].is<int>() || !doc["duration_ms"].is<uint32_t>() ||
         !doc["expires_at_ms"].is<uint64_t>()) { report(id, "failed", "Invalid move or connection not ready"); return; }
     const int direction = doc["direction"];
@@ -396,13 +389,9 @@ void networkTask(void*) {
 void setup() {
   digitalWrite(STANDBY, LOW);
   pinMode(STANDBY, OUTPUT);
-  // Also de-energize the two pins used only by the previous ULN2003 wiring.
-  for (uint8_t pin : {17,22}) { digitalWrite(pin, LOW); pinMode(pin, OUTPUT); }
-  for (uint8_t i = 0; i < 3; ++i) {
-    for (uint8_t pin : PINS[i]) { digitalWrite(pin, LOW); pinMode(pin, OUTPUT); }
-    ledcSetup(i, 20000, 8);
-    ledcAttachPin(PINS[i][2], i);
-    ledcWrite(i, 0);
+  // L9110S digital inputs and all former driver outputs start LOW.
+  for (uint8_t pin : {13,14,17,18,19,21,22,25,26,27,32}) {
+    digitalWrite(pin, LOW); pinMode(pin, OUTPUT);
   }
   Serial.begin(115200);
   rmt_config_t rgbConfig = RMT_DEFAULT_CONFIG_TX(GPIO_NUM_16, RMT_CHANNEL_0);

@@ -52,7 +52,9 @@ class Controller {
       return;
     }
     auto& a = axes_[cmd.axis];
-    const bool reverse = a.active && a.direction != cmd.direction;
+    // Preserve the break interval if a pending reversal is replaced; also
+    // insert it when reversing immediately after a stop or timed completion.
+    const bool reverse = a.pending || (a.direction != 0 && a.direction != cmd.direction);
     cancel(cmd.axis);
     a.pending = reverse;
     a.local = cmd.local;
