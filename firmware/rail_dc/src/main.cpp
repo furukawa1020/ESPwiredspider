@@ -7,6 +7,7 @@
 #include <sys/time.h>
 #include <driver/rmt.h>
 #include <esp_wifi.h>
+#include <ESPmDNS.h>
 #include <atomic>
 #include "controller.h"
 
@@ -98,11 +99,18 @@ void showRgb(uint8_t r, uint8_t g, uint8_t b) {
 
 bool plain(const String& value) { return value.indexOf('\r') < 0 && value.indexOf('\n') < 0; }
 bool loadConfig(JsonVariantConst root, Config& out) {
-  if (!root["wifi_ssid"].is<const char*>() || !root["wifi_password"].is<const char*>() ||
-      !root["server_host"].is<const char*>() || !root["device_token"].is<const char*>() ||
-      !root["root_ca"].is<const char*>()) return false;
+  if (!root["wifi_ssid"].is<const char*>() || !root["wifi_password"].is<const char*>()) return false;
   out.ssid = root["wifi_ssid"].as<String>();
   out.password = root["wifi_password"].as<String>();
+  if (out.ssid.length() < 1 || out.ssid.length() > 32 || out.password.length() > 63) return false;
+  // Joining a normal Wi-Fi LAN does not require a central WebSocket server.
+  if (root["server_host"].isNull() || (root["server_host"].is<const char*>() &&
+      !root["server_host"].as<const char*>()[0])) {
+    out.host = ""; out.token = ""; out.ca = "";
+    return true;
+  }
+  if (!root["server_host"].is<const char*>() || !root["device_token"].is<const char*>() ||
+      !root["root_ca"].is<const char*>()) return false;
   out.host = root["server_host"].as<String>();
   out.token = root["device_token"].as<String>();
   out.ca = root["root_ca"].as<String>();
@@ -127,7 +135,7 @@ String statusJson() {
   StaticJsonDocument<2048> doc;
   doc["type"] = "status";
   doc["firmware"] = "rail-dc-xyz-1.0";
-  doc["network_revision"] = 2;
+  doc["network_revision"] = 3;
   doc["uptime_ms"] = millis();
   doc["free_heap"] = ESP.getFreeHeap();
   doc["ap_starts"] = apStarts.load();
@@ -147,6 +155,10 @@ String statusJson() {
   auto rgb = doc.createNestedArray("led_rgb");
   for (uint8_t value : snapshot.rgb) rgb.add(value);
   doc["configured"] = configured;
+  doc["wifi_ssid"] = cfg.ssid;
+  doc["sta_ip"] = WiFi.localIP().toString();
+  doc["hostname"] = "rail-esp32.local";
+  doc["central_server_configured"] = !cfg.host.isEmpty();
   doc["wifi_connected"] = WiFi.status() == WL_CONNECTED;
   doc["server_connected"] = linkHealthy();
   doc["drive_mode"] = "high_low";
@@ -155,7 +167,7 @@ String statusJson() {
   doc["http_auth_required"] = false;
   doc["ap_ip"] = WiFi.softAPIP().toString();
   doc["ap_ssid"] = apName;
-  doc["ip"] = configured ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
+  doc["ip"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : WiFi.softAPIP().toString();
   auto axes = doc.createNestedArray("axes");
   for (int i = 0; i < 3; ++i) {
     auto a = axes.createNestedObject();
@@ -262,11 +274,12 @@ void processSerialLine(const String& text) {
   }
   Config candidate;
   if (!loadConfig(doc.as<JsonVariantConst>(), candidate)) {
-    Serial.println("Configuration rejected: required Wi-Fi, host, token or CA fields are invalid.");
+    Serial.println("Configuration rejected: Wi-Fi fields or optional central server fields are invalid.");
     return;
   }
   setLink(false);
   xQueueReset(commandQueue);
+  localStop();
   vTaskDelay(pdMS_TO_TICKS(20));
   Preferences preferences;
   if (!preferences.begin("rail-dc", false)) { Serial.println("Configuration save failed"); return; }
@@ -388,6 +401,7 @@ void networkTask(void*) {
   serialLine.reserve(8192);
   bool overflow = false;
   uint32_t lastHeartbeat = 0;
+  bool mdnsStarted = false;
   for (;;) {
     for (unsigned i = 0; i < 128 && Serial.available(); ++i) {
       const char c = Serial.read();
@@ -402,12 +416,16 @@ void networkTask(void*) {
       }
     }
     if (configured && !wifiStarted) {
+      WiFi.setHostname("rail-esp32");
       WiFi.setAutoReconnect(true);
       WiFi.begin(cfg.ssid.c_str(), cfg.password.c_str());
-      configTime(0, 0, "pool.ntp.org", "time.google.com");
+      if (!cfg.host.isEmpty()) configTime(0, 0, "pool.ntp.org", "time.google.com");
       wifiStarted = true;
     }
-    if (wifiStarted && WiFi.status() == WL_CONNECTED && utcMs() > 1700000000000ULL && !socketStarted) {
+    if (wifiStarted && WiFi.status() == WL_CONNECTED && !mdnsStarted) {
+      if (MDNS.begin("rail-esp32")) { MDNS.addService("http", "tcp", 80); mdnsStarted = true; }
+    }
+    if (wifiStarted && !cfg.host.isEmpty() && WiFi.status() == WL_CONNECTED && utcMs() > 1700000000000ULL && !socketStarted) {
       authHeader = "Authorization: Bearer " + cfg.token + "\r\n";
       ws.beginSslWithCA(cfg.host.c_str(), cfg.port, cfg.path.c_str(), cfg.ca.c_str());
       ws.setExtraHeaders(authHeader.c_str());
