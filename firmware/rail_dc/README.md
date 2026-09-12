@@ -2,6 +2,14 @@
 
 現在はL9110S経由のDCモーター1台を、`axis: "x"` で実際に動かします。LEDだけの確認モードは終了しています。Wi-Fi/APの設定とAPI認証なしの構成は維持しています。
 
+## 普段のWi-Fiで使う（現在の接続）
+
+ESP32は `AiR-WiFi_0ZRTLV` に自動接続する設定をNVSに保存しています。PC・スマホも同じWi-Fiへ接続して、操作ページ `http://192.168.77.122/` を開いてください（2026-09-12の取得IP）。APIはこのホストの `/api/v1/rail/move`、`/stop`、`/status` です。ESP32専用Wi-Fiへ切り替える必要はありません。
+
+ネットワーク改訂3はWi-FiのSSID・パスワードだけでも設定でき、外部中央サーバーは任意です。IPはDHCPで変わる場合があります。mDNS対応端末では `http://rail-esp32.local/`、USBシリアルstatusではsta_ipを利用できます。ルーター側でDHCP予約を設定すればIPを固定できます。
+
+Windowsに保存済みの対象Wi-Fiを設定するには `scripts/configure-rail-lan.py --profile <プロファイル名> --port COM12` をpyserialのあるPythonで実行します。対象の接続情報だけを読み取り、パスワードを出力せずESP32へ設定し、一時エクスポートファイルを削除します。この操作は中央サーバー未設定のWi-Fi設定に置き換えます。
+
 ## 配線
 
 - GPIO18 → L9110SのIA（モジュールのA-IA / IN1）
