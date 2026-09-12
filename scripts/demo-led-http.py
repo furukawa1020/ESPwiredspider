@@ -1,5 +1,7 @@
 """Temporarily connect to the ESP32 AP, exercise HTTP LED preview, restore Wi-Fi."""
 import json
+import sys
+import argparse
 from pathlib import Path
 import subprocess
 import tempfile
@@ -9,15 +11,21 @@ import xml.etree.ElementTree as ET
 import serial
 
 BASE = "http://192.168.4.1"
+sys.stdout.reconfigure(errors="replace")
 INTERFACE = "Wi-Fi"
-ORIGINAL_PROFILE = "meitetsu-inn"
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--port", default="COM11")
+parser.add_argument("--restore-profile", required=True)
+parser.add_argument("--reset", action="store_true")
+args = parser.parse_args()
+ORIGINAL_PROFILE = args.restore_profile
 PROFILE = "Codex-Rail-LED-Demo"
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def netsh(*args):
     result = subprocess.run(["netsh", "wlan", *args], capture_output=True, check=True)
-    print(result.stdout.decode(errors="replace"), flush=True)
+    print(result.stdout.decode("mbcs", errors="replace"), flush=True)
     return result
 
 
@@ -32,9 +40,14 @@ def request(path, data=None):
 port = serial.Serial(port=None, baudrate=115200, timeout=0.5, write_timeout=3)
 port.dtr = False
 port.rts = False
-port.port = "COM11"
+port.port = args.port
 port.open()
 try:
+    if args.reset:
+        port.rts = True
+        time.sleep(0.15)
+        port.rts = False
+        time.sleep(3)
     port.reset_input_buffer()
     port.write(b"\naccess\n")
     deadline = time.monotonic() + 8
@@ -91,6 +104,7 @@ try:
     netsh("connect", "name=" + PROFILE, "ssid=" + access["ssid"], "interface=" + INTERFACE)
     time.sleep(4)
     netsh("show", "interfaces")
+    print(subprocess.run(["ipconfig"], capture_output=True).stdout.decode("mbcs", errors="replace"), flush=True)
     deadline = time.monotonic() + 25
     while True:
         try:
@@ -100,6 +114,7 @@ try:
             break
         except (OSError, ValueError):
             if time.monotonic() >= deadline:
+                print(subprocess.run(["ipconfig"], capture_output=True).stdout.decode("mbcs", errors="replace"), flush=True)
                 raise RuntimeError("Could not reach ESP32 HTTP server")
             time.sleep(0.5)
     print("Connected; unauthenticated GET status succeeded", flush=True)
