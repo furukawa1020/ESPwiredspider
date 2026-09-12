@@ -4,7 +4,7 @@
 
 ## 普段のWi-Fiで使う（現在の接続）
 
-ESP32は `AiR-WiFi_0ZRTLV` に自動接続する設定をNVSに保存しています。PC・スマホも同じWi-Fiへ接続して、操作ページ `http://192.168.77.122/` を開いてください（2026-09-12の取得IP）。APIはこのホストの `/api/v1/rail/move`、`/stop`、`/status` です。ESP32専用Wi-Fiへ切り替える必要はありません。
+ESP32は `AiR-WiFi_0ZRTLV` に自動接続する設定をNVSに保存しています。PC・スマホも同じWi-Fiへ接続して、操作ページ `http://rail-esp32.local/` を開いてください。2026-09-12に名前でのHTTP 200を確認しています。現在の取得IPは `http://192.168.233.122/` です（以前の192.168.77.122からLANの変更に伴い更新）。APIはこのホストの `/api/v1/rail/move`、`/stop`、`/status` です。ESP32専用Wi-Fiへ切り替える必要はありません。
 
 ネットワーク改訂3はWi-FiのSSID・パスワードだけでも設定でき、外部中央サーバーは任意です。IPはDHCPで変わる場合があります。mDNS対応端末では `http://rail-esp32.local/`、USBシリアルstatusではsta_ipを利用できます。ルーター側でDHCP予約を設定すればIPを固定できます。
 
@@ -79,3 +79,4 @@ TLSのCA証明書検証を行います。設定前でもAPと直接HTTPは動作
 
 停止状態確認: `scripts/verify-dc.py --port COM12` をpyserialのあるPythonで実行。
 モーターのHTTP実機確認: `scripts/demo-led-http.py --port COM12 --restore-profile <元のWi-Fiプロファイル> --hold-open --motor`。実際に短時間正転・逆転させるため、明示的に--motorを指定します。テスト終了時は停止し、PCを元のWi-Fiへ戻します。
+
