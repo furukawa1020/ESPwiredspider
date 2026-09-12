@@ -1,12 +1,15 @@
 """Read the running firmware status over USB; never issue a move."""
 import json
+import argparse
 import time
 import serial
 
 connection = serial.Serial(port=None, baudrate=115200, timeout=0.5, write_timeout=3)
 connection.dtr = False
 connection.rts = False
-connection.port = "COM11"
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--port", default="COM11")
+connection.port = parser.parse_args().port
 connection.open()
 try:
     connection.write(b"\nstatus\n")

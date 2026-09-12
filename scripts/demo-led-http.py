@@ -17,6 +17,9 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--port", default="COM11")
 parser.add_argument("--restore-profile", required=True)
 parser.add_argument("--reset", action="store_true")
+parser.add_argument("--hold-open", action="store_true")
+parser.add_argument("--soak-seconds", type=int, default=0)
+parser.add_argument("--connect-timeout", type=int, default=90)
 args = parser.parse_args()
 ORIGINAL_PROFILE = args.restore_profile
 PROFILE = "Codex-Rail-LED-Demo"
@@ -63,7 +66,8 @@ try:
     if access is None:
         raise RuntimeError("ESP32 did not provide AP credentials")
 finally:
-    port.close()
+    if not args.hold_open:
+        port.close()
 
 ns = "http://www.microsoft.com/networking/WLAN/profile/v1"
 ET.register_namespace("", ns)
@@ -105,7 +109,8 @@ try:
     time.sleep(4)
     netsh("show", "interfaces")
     print(subprocess.run(["ipconfig"], capture_output=True).stdout.decode("mbcs", errors="replace"), flush=True)
-    deadline = time.monotonic() + 25
+    deadline = time.monotonic() + args.connect_timeout
+    attempts = 0
     while True:
         try:
             code, status = request("/api/v1/rail/status")
@@ -113,6 +118,9 @@ try:
             assert status["rgb_led_ready"] and not status["http_auth_required"]
             break
         except (OSError, ValueError):
+            attempts += 1
+            if attempts % 5 == 0:
+                print("Waiting for DHCP/HTTP, attempt:", attempts, flush=True)
             if time.monotonic() >= deadline:
                 print(subprocess.run(["ipconfig"], capture_output=True).stdout.decode("mbcs", errors="replace"), flush=True)
                 raise RuntimeError("Could not reach ESP32 HTTP server")
@@ -139,6 +147,15 @@ try:
     code, stopped = request("/api/v1/rail/stop", {"axis": None})
     assert code == 202, stopped
     print("PASS: HTTP move/status/stop without authentication; RGB outputs and timed stop", flush=True)
+    end = time.monotonic() + args.soak_seconds
+    checked = 0
+    while time.monotonic() < end:
+        code, status = request("/api/v1/rail/status")
+        assert code == 200 and not status["standby_pin_high"]
+        checked += 1
+        if checked % 10 == 0:
+            print("HTTP stability checks:", checked, flush=True)
+        time.sleep(1)
 finally:
     try:
         request("/api/v1/rail/stop", {"axis": None})
@@ -149,3 +166,4 @@ finally:
         netsh("delete", "profile", "name=" + PROFILE, "interface=" + INTERFACE)
     print("Original Wi-Fi reconnection requested", flush=True)
     Path(".pio/led-http-demo.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    port.close()
