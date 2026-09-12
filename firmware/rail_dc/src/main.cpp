@@ -1,4 +1,4 @@
-#include <Arduino.h>
+﻿#include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <WiFi.h>
@@ -6,6 +6,8 @@
 #include <WebServer.h>
 #include <sys/time.h>
 #include <driver/rmt.h>
+#include <esp_wifi.h>
+#include <atomic>
 #include "controller.h"
 
 namespace {
@@ -28,6 +30,21 @@ bool configured = false, socketStarted = false, wifiStarted = false;
 String authHeader;
 WebServer http(80);
 String apName, apPassword;
+std::atomic<uint32_t> apStarts{0}, apStops{0}, httpRequests{0};
+
+const char CONTROL_PAGE[] PROGMEM = R"HTML(<!doctype html>
+<html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>レール操作</title><style>body{font:18px system-ui;max-width:640px;margin:32px auto;padding:16px}button,input{font:inherit;padding:12px;margin:6px}pre{white-space:pre-wrap;font-size:14px}#stop{background:#ad1717;color:white}</style>
+<h1>レール操作</h1><p>X軸・GPIO18 / GPIO19</p>
+<label>動作時間（ミリ秒）<input id="duration" type="number" min="1" max="60000" step="1" value="500"></label>
+<p><button onclick="move(1)">正転</button><button onclick="move(-1)">逆転</button><button id="stop" onclick="send('/stop',{axis:null})">停止</button></p>
+<p id="result" role="status">接続確認中</p><pre id="state"></pre>
+<script>
+async function send(path,body){try{const r=await fetch('/api/v1/rail'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await r.json();document.querySelector('#result').textContent=r.ok?'指令を受け付けました':JSON.stringify(data);await fetchStatus();}catch(e){document.querySelector('#result').textContent='通信できません。Wi-Fi接続を確認してください。'}}
+function move(direction){const duration_ms=Number(document.querySelector('#duration').value);if(!Number.isInteger(duration_ms)||duration_ms<1||duration_ms>60000){document.querySelector('#result').textContent='1〜60000ミリ秒の整数を入力してください。';return;}send('/move',{axis:'x',direction,duration_ms});}
+async function fetchStatus(){try{const r=await fetch('/api/v1/rail/status',{cache:'no-store'});if(!r.ok)throw Error(r.status);document.querySelector('#state').textContent=JSON.stringify(await r.json(),null,2);if(document.querySelector('#result').textContent==='接続確認中')document.querySelector('#result').textContent='接続できています';}catch(e){document.querySelector('#state').textContent='状態を取得できません';}}
+async function poll(){await fetchStatus();setTimeout(poll,2000);}poll();
+</script></html>)HTML";
 
 uint64_t utcMs() {
   timeval tv;
@@ -107,9 +124,20 @@ bool loadConfig(JsonVariantConst root, Config& out) {
 String statusJson() {
   Snapshot snapshot{};
   xQueuePeek(snapshotQueue, &snapshot, 0);
-  StaticJsonDocument<1280> doc;
+  StaticJsonDocument<2048> doc;
   doc["type"] = "status";
   doc["firmware"] = "rail-dc-xyz-1.0";
+  doc["network_revision"] = 2;
+  doc["uptime_ms"] = millis();
+  doc["free_heap"] = ESP.getFreeHeap();
+  doc["ap_starts"] = apStarts.load();
+  doc["ap_stops"] = apStops.load();
+  doc["http_requests"] = httpRequests.load();
+  doc["ap_clients"] = WiFi.softAPgetStationNum();
+  doc["wifi_mode"] = WiFi.getMode() == WIFI_AP ? "ap" : "ap_sta";
+  uint8_t channel = 0;
+  wifi_second_chan_t secondary;
+  if (esp_wifi_get_channel(&channel, &secondary) == ESP_OK) doc["ap_channel"] = channel;
   doc["mode"] = "dc_l9110s";
   doc["simulated"] = false;
   doc["driver"] = "L9110S";
@@ -153,6 +181,7 @@ void localStop() {
 }
 
 void httpCommand(bool stopping) {
+  ++httpRequests;
   StaticJsonDocument<512> doc;
   if (!http.header("Content-Type").startsWith("application/json") ||
       http.arg("plain").length() > 512 || deserializeJson(doc, http.arg("plain")) ||
@@ -189,14 +218,24 @@ void httpCommand(bool stopping) {
 }
 
 void httpTask(void*) {
+  http.enableCORS(true);
   const char* headers[] = {"Content-Type"};
   http.collectHeaders(headers, 1);
   http.on("/api/v1/rail/move", HTTP_POST, [] { httpCommand(false); });
   http.on("/api/v1/rail/stop", HTTP_POST, [] { httpCommand(true); });
   http.on("/api/v1/rail/status", HTTP_GET, [] {
+    ++httpRequests;
     http.send(200, "application/json", statusJson());
   });
-  http.onNotFound([] { http.send(404, "application/json", "{\"error\":\"not found\"}"); });
+  http.on("/", HTTP_GET, [] { ++httpRequests; http.send_P(200, "text/html; charset=utf-8", CONTROL_PAGE); });
+  http.onNotFound([] {
+    if (http.method() == HTTP_OPTIONS && http.uri().startsWith("/api/v1/rail/")) {
+      http.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      http.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+      http.send(204); return;
+    }
+    http.send(404, "application/json", "{\"error\":\"not found\"}");
+  });
   http.begin();
   for (;;) { http.handleClient(); vTaskDelay(pdMS_TO_TICKS(2)); }
 }
@@ -324,9 +363,21 @@ void networkTask(void*) {
     Serial.println("Local access credentials are temporary: NVS unavailable");
   }
   apName = "Rail-ESP32-" + String(static_cast<uint32_t>(ESP.getEfuseMac()), HEX);
-  WiFi.mode(WIFI_AP_STA);
-  if (!WiFi.softAP(apName.c_str(), apPassword.c_str()))
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t) {
+    if (event == ARDUINO_EVENT_WIFI_AP_START) { ++apStarts; Serial.println("Wi-Fi AP started"); }
+    if (event == ARDUINO_EVENT_WIFI_AP_STOP) { ++apStops; Serial.println("Wi-Fi AP stopped"); }
+    if (event == ARDUINO_EVENT_WIFI_AP_STACONNECTED) Serial.println("Wi-Fi client connected");
+    if (event == ARDUINO_EVENT_WIFI_AP_STADISCONNECTED) Serial.println("Wi-Fi client disconnected");
+  });
+  WiFi.persistent(false);
+  if (!WiFi.mode(configured ? WIFI_AP_STA : WIFI_AP)) Serial.println("Wi-Fi mode setup failed");
+  WiFi.setSleep(false);
+  const IPAddress apIp(192,168,4,1), mask(255,255,255,0), leaseStart(192,168,4,2);
+  if (!WiFi.softAPConfig(apIp, apIp, mask, leaseStart)) Serial.println("AP IP/DHCP setup failed");
+  if (!WiFi.softAP(apName.c_str(), apPassword.c_str(), 1, 0, 4))
     Serial.println("Access point startup failed");
+  if (esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20) != ESP_OK)
+    Serial.println("AP 20 MHz setup failed");
   Serial.println("HTTP API enabled. Always-on AP; serial 'access' shows saved credentials.");
   if (xTaskCreatePinnedToCore(httpTask, "rail-http", 10000, nullptr, 1, nullptr, 0) != pdPASS)
     Serial.println("HTTP task failed to start");
@@ -442,3 +493,4 @@ void loop() {
   xQueueOverwrite(snapshotQueue, &snapshot);
   delay(1);
 }
+
