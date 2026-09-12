@@ -2,6 +2,9 @@
 import json
 import sys
 import argparse
+import ctypes as C
+from ctypes import wintypes as W
+import uuid
 from pathlib import Path
 import subprocess
 import tempfile
@@ -20,6 +23,7 @@ parser.add_argument("--reset", action="store_true")
 parser.add_argument("--hold-open", action="store_true")
 parser.add_argument("--soak-seconds", type=int, default=0)
 parser.add_argument("--connect-timeout", type=int, default=90)
+parser.add_argument("--close-during-soak", action="store_true")
 args = parser.parse_args()
 ORIGINAL_PROFILE = args.restore_profile
 PROFILE = "Codex-Rail-LED-Demo"
@@ -85,7 +89,8 @@ ssid_config = element(root, "SSIDConfig")
 ssid = element(ssid_config, "SSID")
 element(ssid, "name", access["ssid"])
 element(root, "connectionType", "ESS")
-element(root, "connectionMode", "manual")
+element(root, "connectionMode", "auto")
+element(root, "autoSwitch", "false")
 security = element(element(root, "MSM"), "security")
 auth = element(security, "authEncryption")
 element(auth, "authentication", "WPA2PSK")
@@ -103,6 +108,19 @@ try:
         ET.ElementTree(root).write(profile_file, encoding="utf-8", xml_declaration=True)
         netsh("add", "profile", "filename=" + str(profile_file), "user=current")
         added = True
+    netsh("set", "profileorder", "name=" + PROFILE, "interface=" + INTERFACE, "priority=1")
+    wlan = C.WinDLL("wlanapi")
+    wlan.WlanOpenHandle.argtypes = [W.DWORD, C.c_void_p, C.POINTER(W.DWORD), C.POINTER(W.HANDLE)]
+    wlan.WlanScan.argtypes = [W.HANDLE, C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p]
+    wlan.WlanCloseHandle.argtypes = [W.HANDLE, C.c_void_p]
+    handle, version = W.HANDLE(), W.DWORD()
+    if wlan.WlanOpenHandle(2, None, C.byref(version), C.byref(handle)) == 0:
+        try:
+            guid = C.create_string_buffer(uuid.UUID("80590500-d636-4a5d-85e0-e66b96959c20").bytes_le)
+            print("Fresh WLAN scan result:", wlan.WlanScan(handle, guid, None, None, None), flush=True)
+            time.sleep(8)
+        finally:
+            wlan.WlanCloseHandle(handle, None)
     netsh("disconnect", "interface=" + INTERFACE)
     time.sleep(1)
     netsh("connect", "name=" + PROFILE, "ssid=" + access["ssid"], "interface=" + INTERFACE)
@@ -147,6 +165,9 @@ try:
     code, stopped = request("/api/v1/rail/stop", {"axis": None})
     assert code == 202, stopped
     print("PASS: HTTP move/status/stop without authentication; RGB outputs and timed stop", flush=True)
+    if args.close_during_soak:
+        port.close()
+        print("USB serial closed; checking Wi-Fi-only operation", flush=True)
     end = time.monotonic() + args.soak_seconds
     checked = 0
     while time.monotonic() < end:
@@ -156,6 +177,7 @@ try:
         if checked % 10 == 0:
             print("HTTP stability checks:", checked, flush=True)
         time.sleep(1)
+    print("PASS: stability duration", args.soak_seconds, "seconds; successful requests", checked, flush=True)
 finally:
     try:
         request("/api/v1/rail/stop", {"axis": None})
