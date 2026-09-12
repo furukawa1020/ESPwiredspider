@@ -26,6 +26,8 @@ try:
             continue
         assert status["firmware"] == "rail-dc-xyz-1.0", status
         assert not status["standby_pin_high"], status
+        if status.get("mode") == "dc_l9110s":
+            assert status["gpio18"] == 0 and status["gpio19"] == 0, status
         assert all(not a["active"] and not a["pending"] for a in status["axes"]), status
         assert status["http_port"] == 80, status
         print(json.dumps(status, ensure_ascii=False))

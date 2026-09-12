@@ -24,6 +24,7 @@ parser.add_argument("--hold-open", action="store_true")
 parser.add_argument("--soak-seconds", type=int, default=0)
 parser.add_argument("--connect-timeout", type=int, default=90)
 parser.add_argument("--close-during-soak", action="store_true")
+parser.add_argument("--motor", action="store_true", help="Run two 1-second physical L9110S motor pulses")
 args = parser.parse_args()
 ORIGINAL_PROFILE = args.restore_profile
 PROFILE = "Codex-Rail-LED-Demo"
@@ -132,7 +133,8 @@ try:
     while True:
         try:
             code, status = request("/api/v1/rail/status")
-            assert status["mode"] == "led_preview", "Refusing demo with motor outputs enabled"
+            expected_mode = "dc_l9110s" if args.motor else "led_preview"
+            assert status["mode"] == expected_mode, "Firmware mode does not match requested demo"
             assert status["rgb_led_ready"] and not status["http_auth_required"]
             break
         except (OSError, ValueError):
@@ -144,24 +146,36 @@ try:
                 raise RuntimeError("Could not reach ESP32 HTTP server")
             time.sleep(0.5)
     print("Connected; unauthenticated GET status succeeded", flush=True)
-    for axis, direction, expected in [("x", 1, [40, 0, 0]), ("y", 1, [0, 40, 0]),
-                                      ("z", 1, [0, 0, 40]), ("z", -1, None)]:
-        code, result = request("/api/v1/rail/move", {"axis": axis, "direction": direction, "duration_ms": 3000})
+    cases = [("x", 1, [40, 0, 0]), ("x", -1, [40, 0, 0])] if args.motor else [
+        ("x", 1, [40, 0, 0]), ("y", 1, [0, 40, 0]), ("z", 1, [0, 0, 40]), ("z", -1, None)]
+    duration_ms = 1000 if args.motor else 3000
+    for axis, direction, expected in cases:
+        code, result = request("/api/v1/rail/move", {"axis": axis, "direction": direction, "duration_ms": duration_ms})
         assert code == 202 and result["status"] == "accepted", result
         start = time.monotonic()
         colors = set()
-        while time.monotonic() - start < 3.3:
+        pin_states = set()
+        while time.monotonic() - start < duration_ms / 1000 + 0.5:
             _, status = request("/api/v1/rail/status")
             colors.add(tuple(status["led_rgb"]))
+            if args.motor:
+                pin_states.add((status["gpio18"], status["gpio19"]))
             assert not status["standby_pin_high"], status
             time.sleep(0.1)
         assert not any(a["active"] or a["pending"] for a in status["axes"]), status
         assert tuple(expected or [0, 0, 40]) in colors, colors
         assert (0, 0, 0) in colors, colors
+        if args.motor:
+            assert ((1, 0) if direction == 1 else (0, 1)) in pin_states, pin_states
+            assert (status["gpio18"], status["gpio19"]) == (0, 0), status
         entry = {"axis": axis, "direction": direction, "accepted": True,
                  "observed_rgb": sorted(colors), "timed_stop": True}
         report.append(entry)
+        if args.motor:
+            entry["gpio18_gpio19"] = sorted(pin_states)
         print(json.dumps(entry), flush=True)
+        if args.motor:
+            time.sleep(1)
     code, stopped = request("/api/v1/rail/stop", {"axis": None})
     assert code == 202, stopped
     print("PASS: HTTP move/status/stop without authentication; RGB outputs and timed stop", flush=True)
@@ -187,5 +201,6 @@ finally:
     if added:
         netsh("delete", "profile", "name=" + PROFILE, "interface=" + INTERFACE)
     print("Original Wi-Fi reconnection requested", flush=True)
-    Path(".pio/led-http-demo.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    report_file = ".pio/motor-http-demo.json" if args.motor else ".pio/led-http-demo.json"
+    Path(report_file).write_text(json.dumps(report, indent=2), encoding="utf-8")
     port.close()
